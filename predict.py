@@ -32,6 +32,37 @@ def validate_range(name, value, minimum, maximum):
         )
 
 
+def get_phase1_health_status(N, P, K, ph, EC):
+    """Estimate Phase 1 soil health status from dry-soil sensor values."""
+    nutrient_low = N < 35 or P < 18 or K < 12
+    nutrient_critical = N < 20 or P < 10 or K < 8
+    ph_stress = ph < 5.5 or ph > 7.5
+    ph_critical = ph < 5.0 or ph > 8.3
+    ec_low = EC < 250
+    ec_high = EC > 2200
+
+    if ec_high:
+        return "High Salinity"
+    if ec_low and nutrient_critical:
+        return "Severe Depletion (Low EC)"
+    if nutrient_critical or ph_critical:
+        return "Nutrient Deficient"
+    if nutrient_low or ph_stress:
+        return "Moderate Stress"
+    return "Healthy for Transplanting"
+
+
+def get_phase2_health_status(ORP):
+    """Estimate Phase 2 muddy-soil health from ORP values."""
+    if ORP > 200:
+        return "Oxidizing Stress (High ORP)"
+    if ORP < -200:
+        return "Reducing Stress (Low ORP)"
+    if -150 <= ORP <= 150:
+        return "Healthy Redox for Paddy"
+    return "Monitor Redox"
+
+
 def phase1_predict(N, P, K, ph, EC):
     """Run Phase 1 predictions for NPK, pH, and EC inputs."""
     validate_range("N", N, *N_RANGE)
@@ -87,6 +118,7 @@ def phase1_predict(N, P, K, ph, EC):
         }
 
     return {
+        "Health_Status": get_phase1_health_status(N, P, K, ph, EC),
         "NPK": {
             "Urea_kg_per_acre": float(npk_prediction[0]),
             "DAP_kg_per_acre": float(npk_prediction[1]),
@@ -105,6 +137,7 @@ def phase2_predict(ORP):
     orp_prediction = orp_model.predict(orp_input)[0]
 
     return {
+        "Health_Status": get_phase2_health_status(ORP),
         "Phase2_ORP_Flood_Water_Liters": float(orp_prediction),
     }
 

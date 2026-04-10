@@ -17,8 +17,10 @@ def flatten_recommendations(result: dict) -> dict:
         if isinstance(values, dict):
             for key, value in values.items():
                 flat_result[key] = round(float(value), 2)
-        else:
+        elif isinstance(values, (int, float)):
             flat_result[section] = round(float(values), 2)
+        else:
+            flat_result[section] = values
     return flat_result
 
 
