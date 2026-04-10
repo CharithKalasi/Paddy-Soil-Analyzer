@@ -49,6 +49,18 @@ def build_phase1_context(sensor_input: dict, recommendations: dict) -> str:
     return "\n".join(lines)
 
 
+def build_phase2_context(sensor_input: dict, recommendations: dict) -> str:
+    lines = [
+        "Phase 2 sensor input:",
+        f"- ORP_mV: {sensor_input['ORP_mV']}",
+        "",
+        "Model recommendations:",
+    ]
+    for key, value in recommendations.items():
+        lines.append(f"- {key}: {value}")
+    return "\n".join(lines)
+
+
 def get_llm_response(api_key: str, model_name: str, context_text: str, chat_history: list[dict]) -> str:
     client = OpenAI(
         api_key=api_key,
@@ -225,11 +237,83 @@ with phase2_tab:
         }
         try:
             phase2_result = phase2_predict(ORP=orp_value)
+            flat_phase2 = flatten_recommendations(phase2_result)
 
             st.success("Phase 2 recommendation generated.")
 
-            render_vertical_list("Sensor Data", sensor_input)
-            render_vertical_list("Recommended Outputs", phase2_result)
+            st.session_state["phase2_sensor_input"] = sensor_input
+            st.session_state["phase2_recommendations"] = flat_phase2
+            st.session_state["phase2_chat_messages"] = []
+            st.session_state["phase2_chat_initialized"] = False
 
         except ValueError as error:
             st.error(str(error))
+
+    if "phase2_sensor_input" in st.session_state and "phase2_recommendations" in st.session_state:
+        render_vertical_list("Sensor Data", st.session_state["phase2_sensor_input"])
+        render_vertical_list("Recommended Outputs", st.session_state["phase2_recommendations"])
+
+    st.markdown("---")
+    st.subheader("Farmer Chat Assistant (Phase 2)")
+
+    if "phase2_sensor_input" in st.session_state and "phase2_recommendations" in st.session_state:
+        context_text = build_phase2_context(
+            st.session_state["phase2_sensor_input"],
+            st.session_state["phase2_recommendations"],
+        )
+
+        if not groq_api_key:
+            st.info("Add GROQ_API_KEY in .env to start the Phase 2 chat assistant.")
+        else:
+            if not st.session_state.get("phase2_chat_initialized", False):
+                with st.spinner("Generating initial advisor response..."):
+                    try:
+                        initial_prompt = {
+                            "role": "user",
+                            "content": (
+                                "Based on this ORP reading and recommendations, what are the top 2-3 actions "
+                                "for water/redox management before and after paddy transplanting?"
+                            ),
+                        }
+                        initial_response = get_llm_response(
+                            groq_api_key,
+                            llm_model_name,
+                            context_text,
+                            [initial_prompt],
+                        )
+                        st.session_state["phase2_chat_messages"].append(
+                            {"role": "assistant", "content": initial_response}
+                        )
+                        st.session_state["phase2_chat_initialized"] = True
+                    except Exception as error:
+                        st.error(f"LLM request failed: {error}")
+
+            for message in st.session_state.get("phase2_chat_messages", []):
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+
+            user_prompt = st.chat_input(
+                "Ask follow-up questions about Phase 2 recommendations",
+                key="phase2_chat_input",
+            )
+            if user_prompt:
+                st.session_state["phase2_chat_messages"].append(
+                    {"role": "user", "content": user_prompt}
+                )
+
+                with st.spinner("Thinking..."):
+                    try:
+                        assistant_response = get_llm_response(
+                            groq_api_key,
+                            llm_model_name,
+                            context_text,
+                            st.session_state["phase2_chat_messages"],
+                        )
+                        st.session_state["phase2_chat_messages"].append(
+                            {"role": "assistant", "content": assistant_response}
+                        )
+                        st.rerun()
+                    except Exception as error:
+                        st.error(f"LLM request failed: {error}")
+    else:
+        st.info("Submit Phase 2 sensor values first to start contextual chat.")
