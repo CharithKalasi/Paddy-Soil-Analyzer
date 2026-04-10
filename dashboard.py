@@ -141,11 +141,12 @@ with phase1_tab:
             st.session_state["phase1_chat_messages"] = []
             st.session_state["phase1_chat_initialized"] = False
 
-            render_vertical_list("Sensor Data", sensor_input)
-            render_vertical_list("Recommended Outputs", flat_phase1)
-
         except ValueError as error:
             st.error(str(error))
+
+    if "phase1_sensor_input" in st.session_state and "phase1_recommendations" in st.session_state:
+        render_vertical_list("Sensor Data", st.session_state["phase1_sensor_input"])
+        render_vertical_list("Recommended Outputs", st.session_state["phase1_recommendations"])
 
     st.markdown("---")
     st.subheader("Farmer Chat Assistant (Phase 1)")
@@ -192,9 +193,6 @@ with phase1_tab:
                     {"role": "user", "content": user_prompt}
                 )
 
-                with st.chat_message("user"):
-                    st.markdown(user_prompt)
-
                 with st.spinner("Thinking..."):
                     try:
                         assistant_response = get_llm_response(
@@ -206,12 +204,9 @@ with phase1_tab:
                         st.session_state["phase1_chat_messages"].append(
                             {"role": "assistant", "content": assistant_response}
                         )
+                        st.rerun()
                     except Exception as error:
                         st.error(f"LLM request failed: {error}")
-
-                if st.session_state.get("phase1_chat_messages"):
-                    with st.chat_message("assistant"):
-                        st.markdown(st.session_state["phase1_chat_messages"][-1]["content"])
     else:
         st.info("Submit Phase 1 sensor values first to start contextual chat.")
 
