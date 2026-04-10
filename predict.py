@@ -11,6 +11,13 @@ PH_MODEL_FILE = MODEL_DIR / "ph_model.pkl"
 EC_MODEL_FILE = MODEL_DIR / "ec_model.pkl"
 ORP_MODEL_FILE = MODEL_DIR / "orp_model.pkl"
 
+N_RANGE = (0, 100)
+P_RANGE = (0, 70)
+K_RANGE = (0, 55)
+PH_RANGE = (3.5, 9.0)
+EC_RANGE = (0, 3500)
+ORP_RANGE = (-350, 350)
+
 
 npk_model = joblib.load(NPK_MODEL_FILE)
 ph_model = joblib.load(PH_MODEL_FILE)
@@ -18,8 +25,21 @@ ec_model = joblib.load(EC_MODEL_FILE)
 orp_model = joblib.load(ORP_MODEL_FILE)
 
 
+def validate_range(name, value, minimum, maximum):
+    if value < minimum or value > maximum:
+        raise ValueError(
+            f"{name}={value} is out of range. Valid range is {minimum} to {maximum}."
+        )
+
+
 def phase1_predict(N, P, K, ph, EC):
     """Run Phase 1 predictions for NPK, pH, and EC inputs."""
+    validate_range("N", N, *N_RANGE)
+    validate_range("P", P, *P_RANGE)
+    validate_range("K", K, *K_RANGE)
+    validate_range("ph", ph, *PH_RANGE)
+    validate_range("EC_uS_cm", EC, *EC_RANGE)
+
     npk_input = pd.DataFrame([[N, P, K]], columns=["N", "P", "K"])
     ph_input = pd.DataFrame([[ph]], columns=["ph"])
     ec_input = pd.DataFrame([[EC]], columns=["EC_uS_cm"])
@@ -30,17 +50,41 @@ def phase1_predict(N, P, K, ph, EC):
 
     lime_kg = float(ph_prediction[0])
     gypsum_kg = float(ph_prediction[1])
-    ph_recommendation = {
-        "Lime_kg_per_acre": lime_kg if lime_kg > 0 else 0.0,
-        "Gypsum_kg_per_acre": gypsum_kg if gypsum_kg > 0 else 0.0,
-    }
+
+    if lime_kg >= gypsum_kg and lime_kg > 0:
+        ph_recommendation = {
+            "Lime_kg_per_acre": lime_kg,
+            "Gypsum_kg_per_acre": 0.0,
+        }
+    elif gypsum_kg > 0:
+        ph_recommendation = {
+            "Lime_kg_per_acre": 0.0,
+            "Gypsum_kg_per_acre": gypsum_kg,
+        }
+    else:
+        ph_recommendation = {
+            "Lime_kg_per_acre": 0.0,
+            "Gypsum_kg_per_acre": 0.0,
+        }
 
     ec_boost_kg = float(ec_prediction[0])
     ec_flush_liters = float(ec_prediction[1])
-    ec_recommendation = {
-        "Low_EC_Fertilizer_Boost_kg": ec_boost_kg if ec_boost_kg > 0 else 0.0,
-        "Phase1_EC_Flush_Water_Liters": ec_flush_liters if ec_flush_liters > 0 else 0.0,
-    }
+
+    if ec_boost_kg >= ec_flush_liters and ec_boost_kg > 0:
+        ec_recommendation = {
+            "Low_EC_Fertilizer_Boost_kg": ec_boost_kg,
+            "Phase1_EC_Flush_Water_Liters": 0.0,
+        }
+    elif ec_flush_liters > 0:
+        ec_recommendation = {
+            "Low_EC_Fertilizer_Boost_kg": 0.0,
+            "Phase1_EC_Flush_Water_Liters": ec_flush_liters,
+        }
+    else:
+        ec_recommendation = {
+            "Low_EC_Fertilizer_Boost_kg": 0.0,
+            "Phase1_EC_Flush_Water_Liters": 0.0,
+        }
 
     return {
         "NPK": {
@@ -55,6 +99,8 @@ def phase1_predict(N, P, K, ph, EC):
 
 def phase2_predict(ORP):
     """Run Phase 2 prediction for ORP input."""
+    validate_range("ORP_mV", ORP, *ORP_RANGE)
+
     orp_input = pd.DataFrame([[ORP]], columns=["ORP_mV"])
     orp_prediction = orp_model.predict(orp_input)[0]
 
