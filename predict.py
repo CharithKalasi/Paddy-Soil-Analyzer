@@ -17,6 +17,7 @@ K_RANGE = (0, 55)
 PH_RANGE = (3.5, 9.0)
 EC_RANGE = (0, 3500)
 ORP_RANGE = (-350, 350)
+ORP_FLOOD_VOLUME_LITERS = 10000.0
 
 
 npk_model = joblib.load(NPK_MODEL_FILE)
@@ -33,7 +34,7 @@ def validate_range(name, value, minimum, maximum):
 
 
 def get_phase1_health_status(N, P, K, ph, EC):
-    """Estimate Phase 1 soil health status from dry-soil sensor values."""
+    """Estimate Phase 1 soil health statuses from dry-soil sensor values."""
     nutrient_low = N < 35 or P < 18 or K < 12
     nutrient_critical = N < 20 or P < 10 or K < 8
     ph_stress = ph < 5.5 or ph > 7.5
@@ -41,26 +42,44 @@ def get_phase1_health_status(N, P, K, ph, EC):
     ec_low = EC < 250
     ec_high = EC > 2200
 
+    statuses = []
+
     if ec_high:
-        return "High Salinity"
-    if ec_low and nutrient_critical:
-        return "Severe Depletion (Low EC)"
-    if nutrient_critical or ph_critical:
-        return "Nutrient Deficient"
-    if nutrient_low or ph_stress:
-        return "Moderate Stress"
-    return "Healthy for Transplanting"
+        statuses.append("High Salinity")
+    if ec_low:
+        statuses.append("Low EC")
+
+    if nutrient_critical:
+        statuses.append("Nutrient Deficient")
+    elif nutrient_low:
+        statuses.append("Moderate Nutrient Stress")
+
+    if ph_critical:
+        statuses.append("Critical pH Stress")
+    elif ph_stress:
+        statuses.append("pH Stress")
+
+    if not statuses:
+        statuses.append("Healthy for Transplanting")
+
+    return statuses
 
 
 def get_phase2_health_status(ORP):
-    """Estimate Phase 2 muddy-soil health from ORP values."""
+    """Estimate Phase 2 muddy-soil health statuses from ORP values."""
+    statuses = []
+
     if ORP > 200:
-        return "Oxidizing Stress (High ORP)"
-    if ORP < -200:
-        return "Reducing Stress (Low ORP)"
-    if -150 <= ORP <= 150:
-        return "Healthy Redox for Paddy"
-    return "Monitor Redox"
+        statuses.append("Oxidizing Stress (High ORP)")
+        statuses.append("Flooding Required")
+    elif ORP < -200:
+        statuses.append("Reducing Stress (Low ORP)")
+    elif -150 <= ORP <= 150:
+        statuses.append("Healthy Redox for Paddy")
+    else:
+        statuses.append("Monitor Redox")
+
+    return statuses
 
 
 def phase1_predict(N, P, K, ph, EC):
@@ -72,31 +91,29 @@ def phase1_predict(N, P, K, ph, EC):
     validate_range("EC_uS_cm", EC, *EC_RANGE)
 
     npk_input = pd.DataFrame([[N, P, K]], columns=["N", "P", "K"])
-    ph_input = pd.DataFrame([[ph]], columns=["ph"])
+    # Backward-compatible inference for old (ph-only) and new (ph+EC) PH models.
+    ph_feature_count = None
+    if hasattr(ph_model, "estimators_") and ph_model.estimators_:
+        ph_feature_count = getattr(ph_model.estimators_[0], "n_features_in_", None)
+
+    if ph_feature_count == 2:
+        ph_input = pd.DataFrame([[ph, EC]], columns=["ph", "EC_uS_cm"])
+    else:
+        ph_input = pd.DataFrame([[ph]], columns=["ph"])
+
     ec_input = pd.DataFrame([[EC]], columns=["EC_uS_cm"])
 
     npk_prediction = npk_model.predict(npk_input)[0]
     ph_prediction = ph_model.predict(ph_input)[0]
     ec_prediction = ec_model.predict(ec_input)[0]
 
-    lime_kg = float(ph_prediction[0])
-    gypsum_kg = float(ph_prediction[1])
+    lime_kg = max(0.0, float(ph_prediction[0]))
+    gypsum_kg = max(0.0, float(ph_prediction[1]))
 
-    if lime_kg >= gypsum_kg and lime_kg > 0:
-        ph_recommendation = {
-            "Lime_kg_per_acre": lime_kg,
-            "Gypsum_kg_per_acre": 0.0,
-        }
-    elif gypsum_kg > 0:
-        ph_recommendation = {
-            "Lime_kg_per_acre": 0.0,
-            "Gypsum_kg_per_acre": gypsum_kg,
-        }
-    else:
-        ph_recommendation = {
-            "Lime_kg_per_acre": 0.0,
-            "Gypsum_kg_per_acre": 0.0,
-        }
+    ph_recommendation = {
+        "Lime_kg_per_acre": lime_kg,
+        "Gypsum_kg_per_acre": gypsum_kg,
+    }
 
     ec_boost_kg = float(ec_prediction[0])
     ec_flush_liters = float(ec_prediction[1])
@@ -117,13 +134,36 @@ def phase1_predict(N, P, K, ph, EC):
             "Phase1_EC_Flush_Water_Liters": 0.0,
         }
 
+    npk_recommendation = {
+        "Urea_kg_per_acre": float(npk_prediction[0]),
+        "DAP_kg_per_acre": float(npk_prediction[1]),
+        "MOP_kg_per_acre": float(npk_prediction[2]),
+    }
+
+    health_statuses = get_phase1_health_status(N, P, K, ph, EC)
+
+    # Keep health labels consistent with model-prescribed interventions.
+    fertilizer_needed = any(value > 0 for value in npk_recommendation.values())
+    ph_amendment_needed = (lime_kg > 0) or (gypsum_kg > 0)
+    ec_intervention_needed = (ec_recommendation["Low_EC_Fertilizer_Boost_kg"] > 0) or (
+        ec_recommendation["Phase1_EC_Flush_Water_Liters"] > 0
+    )
+
+    if fertilizer_needed and "Nutrient Replenishment Needed" not in health_statuses:
+        health_statuses.append("Nutrient Replenishment Needed")
+    if ph_amendment_needed and "Soil pH Amendment Needed" not in health_statuses:
+        health_statuses.append("Soil pH Amendment Needed")
+    if ec_intervention_needed and "EC Correction Needed" not in health_statuses:
+        health_statuses.append("EC Correction Needed")
+
+    if (fertilizer_needed or ph_amendment_needed or ec_intervention_needed) and (
+        "Healthy for Transplanting" in health_statuses
+    ):
+        health_statuses.remove("Healthy for Transplanting")
+
     return {
-        "Health_Status": get_phase1_health_status(N, P, K, ph, EC),
-        "NPK": {
-            "Urea_kg_per_acre": float(npk_prediction[0]),
-            "DAP_kg_per_acre": float(npk_prediction[1]),
-            "MOP_kg_per_acre": float(npk_prediction[2]),
-        },
+        "Health_Status": health_statuses,
+        "NPK": npk_recommendation,
         "PH": ph_recommendation,
         "EC": ec_recommendation,
     }
@@ -135,10 +175,12 @@ def phase2_predict(ORP):
 
     orp_input = pd.DataFrame([[ORP]], columns=["ORP_mV"])
     orp_prediction = orp_model.predict(orp_input)[0]
+    # Support both classifier output (0/1) and legacy regressor output (0/10000).
+    flood_needed = float(orp_prediction) > 0.5
 
     return {
         "Health_Status": get_phase2_health_status(ORP),
-        "Phase2_ORP_Flood_Water_Liters": float(orp_prediction),
+        "Phase2_ORP_Flood_Water_Liters": ORP_FLOOD_VOLUME_LITERS if flood_needed else 0.0,
     }
 
 

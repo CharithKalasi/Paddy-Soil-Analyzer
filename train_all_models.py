@@ -19,7 +19,7 @@ def main() -> None:
     df = df.drop(columns=["Health_Status"], errors="ignore")
 
     npk_df = df[["N", "P", "K", "Urea_kg_per_acre", "DAP_kg_per_acre", "MOP_kg_per_acre"]].copy()
-    ph_df = df[["ph", "Lime_kg_per_acre", "Gypsum_kg_per_acre"]].copy()
+    ph_df = df[["ph", "EC_uS_cm", "Lime_kg_per_acre", "Gypsum_kg_per_acre"]].copy()
     ec_df = df[["EC_uS_cm", "Low_EC_Fertilizer_Boost_kg", "Phase1_EC_Flush_Water_Liters"]].copy()
     orp_df = df[["ORP_mV", "Phase2_ORP_Flood_Water_Liters"]].copy()
 

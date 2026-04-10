@@ -17,10 +17,10 @@ CSV_FILE = BASE_DIR / "KrishiLink_MultiOutput_Training_Data_v4.csv"
 def train_ph_model(ph_df: pd.DataFrame):
     """Train and evaluate a multi-output pH recommendation model.
 
-    Lime and gypsum are mutually exclusive in the dataset, so the model is
-    expected to learn that only one target should typically be non-zero per row.
+    Uses both pH and EC as features because the dataset includes rows where
+    Lime and Gypsum are both required (acidic and saline conditions).
     """
-    x = ph_df[["ph"]]
+    x = ph_df[["ph", "EC_uS_cm"]]
     y = ph_df[["Lime_kg_per_acre", "Gypsum_kg_per_acre"]]
 
     x_train, x_test, y_train, y_test = train_test_split(
@@ -37,7 +37,7 @@ def train_ph_model(ph_df: pd.DataFrame):
     y_pred = model.predict(x_test)
 
     target_names = ["Lime_kg_per_acre", "Gypsum_kg_per_acre"]
-    print("PH Model Evaluation")
+    print("PH Model Evaluation (input: ph + EC_uS_cm)")
     print("-" * 30)
     for index, target_name in enumerate(target_names):
         mae = mean_absolute_error(y_test.iloc[:, index], y_pred[:, index])
@@ -56,5 +56,5 @@ def train_ph_model(ph_df: pd.DataFrame):
 if __name__ == "__main__":
     data = pd.read_csv(CSV_FILE)
     data = data.drop(columns=["Health_Status"], errors="ignore")
-    ph_df = data[["ph", "Lime_kg_per_acre", "Gypsum_kg_per_acre"]]
+    ph_df = data[["ph", "EC_uS_cm", "Lime_kg_per_acre", "Gypsum_kg_per_acre"]]
     train_ph_model(ph_df)

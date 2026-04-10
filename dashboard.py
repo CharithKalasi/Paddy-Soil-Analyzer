@@ -24,13 +24,19 @@ def flatten_recommendations(result: dict) -> dict:
     return flat_result
 
 
+def format_value(value) -> str:
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+    return str(value)
+
+
 def render_vertical_list(title: str, values: dict) -> None:
     st.markdown(f"#### {title}")
     for key, value in values.items():
         if isinstance(value, (int, float)):
             st.write(f"{key}: {float(value):.2f}")
         else:
-            st.write(f"{key}: {value}")
+            st.write(f"{key}: {format_value(value)}")
 
 
 def build_phase1_context(sensor_input: dict, recommendations: dict) -> str:
@@ -45,7 +51,7 @@ def build_phase1_context(sensor_input: dict, recommendations: dict) -> str:
         "Model recommendations:",
     ]
     for key, value in recommendations.items():
-        lines.append(f"- {key}: {value}")
+        lines.append(f"- {key}: {format_value(value)}")
     return "\n".join(lines)
 
 
@@ -57,7 +63,7 @@ def build_phase2_context(sensor_input: dict, recommendations: dict) -> str:
         "Model recommendations:",
     ]
     for key, value in recommendations.items():
-        lines.append(f"- {key}: {value}")
+        lines.append(f"- {key}: {format_value(value)}")
     return "\n".join(lines)
 
 
@@ -69,9 +75,11 @@ def get_llm_response(api_key: str, model_name: str, context_text: str, chat_hist
 
     system_prompt = (
         "You are a soil analysis expert for paddy rice farming. "
-        "Give BRIEF, PRACTICAL answers focused on soil amendments and paddy transplanting actions. "
-        "Keep responses to 2-3 short sentences max. Include units. Do NOT invent sensor values. "
-        "Be specific to the soil sensor readings and recommended outputs provided."
+        "Give concise, practical answers focused on what the farmer should do and why. "
+        "Always ground advice in the provided sensor values and model recommendation outputs. "
+        "Do NOT invent sensor values, target thresholds, or hidden agronomy rules. Include units. "
+        "For each relevant output, state action + reason in one short line. "
+        "If an output is 0, say 'No action needed' with a brief reason."
     )
 
     messages = [
@@ -80,6 +88,15 @@ def get_llm_response(api_key: str, model_name: str, context_text: str, chat_hist
             "role": "system",
             "content": f"Use this context for the current field:\n{context_text}",
         },
+        {
+            "role": "system",
+            "content": (
+                "Response format: keep it concise and complete. "
+                "Bullets are optional. "
+                "Use this structure: 'What to do' then 'Why'. "
+                "Keep total response to 6-10 short lines so it does not cut off."
+            ),
+        },
     ]
     messages.extend(chat_history)
 
@@ -87,7 +104,7 @@ def get_llm_response(api_key: str, model_name: str, context_text: str, chat_hist
         model=model_name,
         messages=messages,
         temperature=0.2,
-        max_tokens=150,
+        max_tokens=320,
     )
     return completion.choices[0].message.content or "No response generated."
 
@@ -178,8 +195,9 @@ with phase1_tab:
                         initial_prompt = {
                             "role": "user",
                             "content": (
-                                "Based on these soil sensor values and recommendations, what are the top 2-3 actions "
-                                "to prepare the soil for paddy transplanting?"
+                                "Based on these Phase 1 inputs and outputs, tell the farmer what to do and why. "
+                                "Cover all recommendation outputs in the context, including zeros. "
+                                "Use only the provided sensor values and output values for reasoning."
                             ),
                         }
                         initial_response = get_llm_response(
@@ -271,8 +289,9 @@ with phase2_tab:
                         initial_prompt = {
                             "role": "user",
                             "content": (
-                                "Based on this ORP reading and recommendations, what are the top 2-3 actions "
-                                "for water/redox management before and after paddy transplanting?"
+                                "Based on this Phase 2 ORP input and outputs, tell the farmer what to do and why. "
+                                "Cover all recommendation outputs in the context, including zeros. "
+                                "Use only the provided sensor values and output values for reasoning."
                             ),
                         }
                         initial_response = get_llm_response(

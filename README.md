@@ -1,113 +1,142 @@
 # Paddy Soil Analyzer
 
-This project trains and tests a two-phase paddy soil recommendation pipeline.
+Paddy Soil Analyzer is a two-phase soil decision support project for paddy farming.
 
-Phase 1 uses `N`, `P`, `K`, `ph`, and `EC_uS_cm` to recommend fertilizer and soil amendment actions. Phase 2 uses `ORP_mV` to recommend flooding water for muddy soil preparation. The `Health_Status` column is rule-based and is not used as a model input.
+- Phase 1 (dry soil): uses `N`, `P`, `K`, `ph`, `EC_uS_cm`
+- Phase 2 (muddy soil): uses `ORP_mV`
+
+The project includes:
+
+- ML model training and inference
+- Streamlit dashboard with phase-wise chat assistant
+- FastAPI backend for Flutter/mobile integration
+- ESP data ingestion endpoints for real-time sensor packets
 
 ## Project Layout
 
 - `KrishiLink_MultiOutput_Training_Data_v4.csv` - synthetic training dataset
-- `dataset_data_generator.py` - regenerates the dataset
-- `model_training/` - training and split scripts
-- `train_all_models.py` - trains all four models from one entry point
-- `predict.py` - loads saved models and returns predictions
-- `test_orchestrator.py` - runs five end-to-end sample sensor readings
-- `Models/` - stores saved `.pkl` model files
-
-### Training Scripts
-
-- `model_training/split_training_data.py` - splits the CSV into model-specific dataframes
-- `model_training/npk_model_training.py` - trains the NPK model
-- `model_training/ph_model_training.py` - trains the pH model
-- `model_training/ec_model_training.py` - trains the EC model
-- `model_training/orp_model_training.py` - trains the ORP model
+- `dataset_data_generator.py` - dataset generation utility
+- `model_training/` - model training scripts
+- `train_all_models.py` - trains all models in one run
+- `predict.py` - loads saved models and returns phase predictions
+- `test_orchestrator.py` - phase end-to-end sample tests
+- `dashboard.py` - Streamlit UI (desktop dashboard)
+- `fastapi_server.py` - API server for Flutter + ESP integration
+- `Models/` - saved `.pkl` model files
 
 ## Model Breakdown
 
-### Phase 1: NPK Model
+### Phase 1
 
-- Input: `N`, `P`, `K`
-- Outputs: `Urea_kg_per_acre`, `DAP_kg_per_acre`, `MOP_kg_per_acre`
+- NPK model
+   - Input: `N`, `P`, `K`
+   - Outputs: `Urea_kg_per_acre`, `DAP_kg_per_acre`, `MOP_kg_per_acre`
 
-### Phase 1: pH Model
+- pH model
+   - Inputs: `ph`, `EC_uS_cm`
+   - Outputs: `Lime_kg_per_acre`, `Gypsum_kg_per_acre`
 
-- Input: `ph`
-- Outputs: `Lime_kg_per_acre`, `Gypsum_kg_per_acre`
+- EC model
+   - Input: `EC_uS_cm`
+   - Outputs: `Low_EC_Fertilizer_Boost_kg`, `Phase1_EC_Flush_Water_Liters`
 
-Only one of these should be returned for a given recommendation.
+### Phase 2
 
-### Phase 1: EC Model
+- ORP model
+   - Input: `ORP_mV`
+   - Output: `Phase2_ORP_Flood_Water_Liters`
+   - Trained as binary flood decision and returned as 0 or 10000 liters
 
-- Input: `EC_uS_cm`
-- Outputs: `Low_EC_Fertilizer_Boost_kg`, `Phase1_EC_Flush_Water_Liters`
+## Health Status Logic
 
-Only one of these should be returned for a given recommendation.
+`predict.py` returns multi-label health status based on sensor conditions and intervention needs.
 
-### Phase 2: ORP Model
-
-- Input: `ORP_mV`
-- Output: `Phase2_ORP_Flood_Water_Liters`
+It can return multiple statuses (for example nutrient stress + pH amendment needed) to avoid contradictions with recommended outputs.
 
 ## Requirements
 
-- Python 3.10 or newer
-- `pandas`
-- `numpy`
-- `scikit-learn`
-- `joblib`
+- Python 3.10+
 
-Install dependencies with:
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Training Workflow
+## Training and Test
 
-1. Confirm the CSV exists in the project root.
-2. Run all model training:
+Train all models:
 
 ```bash
 python train_all_models.py
 ```
 
-3. The trained models are saved in `Models/` as:
-   - `Models/npk_model.pkl`
-   - `Models/ph_model.pkl`
-   - `Models/ec_model.pkl`
-   - `Models/orp_model.pkl`
-
-To inspect the sub-datasets before training, run:
-
-```bash
-python -m model_training.split_training_data
-```
-
-## Prediction Workflow
-
-After training, run:
+Run prediction sample:
 
 ```bash
 python predict.py
 ```
 
-This loads all four models from `Models/` and prints sample phase-wise predictions.
-
-## End-to-End Test Workflow
-
-To simulate the full KrishiLink pipeline with five sample sensor readings, run:
+Run end-to-end orchestrator tests:
 
 ```bash
 python test_orchestrator.py
 ```
 
-This script calls `phase1_predict` and `phase2_predict` for each case and prints readable output.
+## Run Streamlit Dashboard
 
-## Input Validation
+```bash
+python -m streamlit run dashboard.py --server.port 8504
+```
 
-`predict.py` validates sensor inputs before inference and raises a `ValueError` if any value is out of range.
+If a port is in use, choose another port.
 
-Valid ranges:
+## Run FastAPI Server
+
+```bash
+python -m uvicorn fastapi_server:app --host 0.0.0.0 --port 8000
+```
+
+Health check:
+
+- `GET /health`
+
+## FastAPI Endpoints
+
+### Dashboard-equivalent data endpoints (no chat)
+
+- `POST /api/phase1/data`
+- `POST /api/phase2/data`
+
+Return shape:
+
+- `phase`
+- `sensor_data`
+- `recommended_outputs`
+
+### Chat endpoints (Flutter can mirror dashboard chat)
+
+- `POST /api/phase1/start`
+- `POST /api/phase2/start`
+- `POST /api/chat/followup`
+- `GET /api/chat/history/{session_id}`
+
+### ESP ingestion endpoints
+
+- `GET /api/esp/sample` - sample ESP payload format
+- `POST /api/esp/ingest` - ingest sensor packet from ESP
+- `GET /api/esp/latest` - latest ingested + processed packet
+- `GET /api/esp/history?limit=20` - recent records
+
+ESP payload fields (send available values):
+
+- `device_id`
+- `timestamp` (optional)
+- `N`, `P`, `K`, `ph`, `EC_uS_cm`, `ORP_mV`
+
+The server auto-processes Phase 1 and/or Phase 2 blocks depending on provided fields.
+
+## Input Validation Ranges
 
 - `N`: 0 to 100
 - `P`: 0 to 70
@@ -116,8 +145,11 @@ Valid ranges:
 - `EC_uS_cm`: 0 to 3500
 - `ORP_mV`: -350 to 350
 
+Invalid inputs return HTTP 400 from API endpoints.
+
 ## Notes
 
-- The dataset is synthetic and intentionally imbalanced to emphasize rare agronomic conditions.
-- `Health_Status` is derived by rules and excluded from model training.
-- The model scripts create the `Models/` directory automatically if it does not already exist.
+- Dataset is synthetic and intentionally imbalanced.
+- `Health_Status` dataset column is not used for model training.
+- `Models/` directory is created automatically by training scripts.
+- FastAPI in-memory session and ESP record stores reset when server restarts.
