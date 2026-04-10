@@ -7,3 +7,4 @@ __pycache__/
 .DS_Store
 KrishiLink_MultiOutput_Training_Data_v4.csv
 Models/*.pkl
+.env
