@@ -17,6 +17,18 @@ load_dotenv()
 
 app = FastAPI(title="KrishiLink Mobile Bridge API", version="1.0.0")
 
+TEST_PHASE1_INPUT = {
+    "N": 80.0,
+    "P": 50.0,
+    "K": 50.0,
+    "ph": 7.0,
+    "EC_uS_cm": 1240.0,
+}
+TEST_PHASE2_INPUT = {
+    "ORP_mV": 0.0,
+}
+TEST_ESP_DEVICE_ID = "test"
+
 # Allow Flutter app calls from mobile and emulator/web debug sessions.
 app.add_middleware(
     CORSMiddleware,
@@ -218,14 +230,14 @@ def health_check() -> dict:
 def esp_sample_data() -> dict:
     """Sample payload format for ESP firmware testing."""
     return {
-        "device_id": "esp-device-1",
+        "device_id": TEST_ESP_DEVICE_ID,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "N": 40,
-        "P": 20,
-        "K": 15,
-        "ph": 6.5,
-        "EC_uS_cm": 800,
-        "ORP_mV": -100,
+        "N": TEST_PHASE1_INPUT["N"],
+        "P": TEST_PHASE1_INPUT["P"],
+        "K": TEST_PHASE1_INPUT["K"],
+        "ph": TEST_PHASE1_INPUT["ph"],
+        "EC_uS_cm": TEST_PHASE1_INPUT["EC_uS_cm"],
+        "ORP_mV": TEST_PHASE2_INPUT["ORP_mV"],
     }
 
 
@@ -317,6 +329,19 @@ def phase1_data(payload: Phase1Request) -> dict:
     }
 
 
+@app.get("/api/phase1/data")
+def phase1_data_get(
+    N: float = TEST_PHASE1_INPUT["N"],
+    P: float = TEST_PHASE1_INPUT["P"],
+    K: float = TEST_PHASE1_INPUT["K"],
+    ph: float = TEST_PHASE1_INPUT["ph"],
+    EC_uS_cm: float = TEST_PHASE1_INPUT["EC_uS_cm"],
+) -> dict:
+    """Browser-friendly test route for Phase 1 predictions using query params."""
+    payload = Phase1Request(N=N, P=P, K=K, ph=ph, EC_uS_cm=EC_uS_cm)
+    return phase1_data(payload)
+
+
 @app.post("/api/phase2/data")
 def phase2_data(payload: Phase2Request) -> dict:
     """Return exactly the Phase 2 data shown on dashboard (no chat)."""
@@ -333,6 +358,32 @@ def phase2_data(payload: Phase2Request) -> dict:
         "phase": "phase2",
         "sensor_data": sensor_input,
         "recommended_outputs": flat_prediction,
+    }
+
+
+@app.get("/api/phase2/data")
+def phase2_data_get(
+    ORP_mV: float = TEST_PHASE2_INPUT["ORP_mV"],
+) -> dict:
+    """Browser-friendly test route for Phase 2 predictions using a query param."""
+    payload = Phase2Request(ORP_mV=ORP_mV)
+    return phase2_data(payload)
+
+
+@app.get("/api/test/demo")
+def test_demo() -> dict:
+    """Single browser-friendly route that returns the precomputed testing payloads."""
+    phase1_payload = Phase1Request(**TEST_PHASE1_INPUT)
+    phase2_payload = Phase2Request(**TEST_PHASE2_INPUT)
+    return {
+        "test_inputs": {
+            "phase1": TEST_PHASE1_INPUT,
+            "phase2": TEST_PHASE2_INPUT,
+            "esp_device_id": TEST_ESP_DEVICE_ID,
+        },
+        "phase1": phase1_data(phase1_payload),
+        "phase2": phase2_data(phase2_payload),
+        "esp_sample": esp_sample_data(),
     }
 
 
