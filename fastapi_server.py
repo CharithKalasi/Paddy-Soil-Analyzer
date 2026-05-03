@@ -1,6 +1,8 @@
+import json
 import os
 from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
@@ -16,18 +18,20 @@ from predict import phase1_predict, phase2_predict
 load_dotenv()
 
 app = FastAPI(title="KrishiLink Mobile Bridge API", version="1.0.0")
+BASE_DIR = Path(__file__).resolve().parent
+SESSION_STORE_FILE = BASE_DIR / "server_state" / "chat_sessions.json"
 
 TEST_PHASE1_INPUT = {
-    "N": 80.0,
-    "P": 50.0,
-    "K": 50.0,
-    "ph": 7.0,
-    "EC_uS_cm": 1240.0,
+    "N": 36.019522063009944,
+    "P": 13.533425852860137,
+    "K": 31.523225141283955,
+    "ph": 3.508955024362526,
+    "EC_uS_cm": 115.37037025619257,
 }
 TEST_PHASE2_INPUT = {
-    "ORP_mV": 0.0,
+    "ORP_mV": -209.22422338399664,
 }
-TEST_ESP_DEVICE_ID = "test"
+TEST_ESP_DEVICE_ID = "flutter-demo-device"
 
 # Allow Flutter app calls from mobile and emulator/web debug sessions.
 app.add_middleware(
@@ -53,6 +57,12 @@ class Phase2Request(BaseModel):
     model_name: str = "llama-3.1-8b-instant"
 
 
+class MobileStartRequest(BaseModel):
+    phase: Literal["phase1", "phase2"]
+    sensor_data: Dict[str, float]
+    model_name: str = "llama-3.1-8b-instant"
+
+
 class FollowupRequest(BaseModel):
     session_id: str
     message: str
@@ -74,6 +84,35 @@ SESSIONS: Dict[str, SessionState] = {}
 ESP_RECORDS = deque(maxlen=500)
 
 
+def _load_session_store() -> Dict[str, SessionState]:
+    if not SESSION_STORE_FILE.exists():
+        return {}
+
+    try:
+        with SESSION_STORE_FILE.open("r", encoding="utf-8") as file:
+            raw_sessions = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    loaded_sessions: Dict[str, SessionState] = {}
+    for session_id, session_data in raw_sessions.items():
+        try:
+            loaded_sessions[session_id] = SessionState.model_validate(session_data)
+        except Exception:
+            continue
+    return loaded_sessions
+
+
+def _save_session_store() -> None:
+    SESSION_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {session_id: session.model_dump() for session_id, session in SESSIONS.items()}
+    with SESSION_STORE_FILE.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2)
+
+
+SESSIONS.update(_load_session_store())
+
+
 class ESPIngestRequest(BaseModel):
     device_id: str = "esp-device-1"
     timestamp: Optional[str] = None
@@ -83,6 +122,25 @@ class ESPIngestRequest(BaseModel):
     ph: Optional[float] = Field(default=None, ge=3.5, le=9.0)
     EC_uS_cm: Optional[float] = Field(default=None, ge=0, le=3500)
     ORP_mV: Optional[float] = Field(default=None, ge=-350, le=350)
+    model_name: str = "llama-3.1-8b-instant"
+
+
+class ESPPhase1Request(BaseModel):
+    device_id: str = "esp-device-1"
+    timestamp: Optional[str] = None
+    N: float = Field(..., ge=0, le=100)
+    P: float = Field(..., ge=0, le=70)
+    K: float = Field(..., ge=0, le=55)
+    ph: float = Field(..., ge=3.5, le=9.0)
+    EC_uS_cm: float = Field(..., ge=0, le=3500)
+    model_name: str = "llama-3.1-8b-instant"
+
+
+class ESPPhase2Request(BaseModel):
+    device_id: str = "esp-device-1"
+    timestamp: Optional[str] = None
+    ORP_mV: float = Field(..., ge=-350, le=350)
+    model_name: str = "llama-3.1-8b-instant"
 
 
 def _make_iso_timestamp(value: Optional[str]) -> str:
@@ -125,6 +183,46 @@ def _phase2_from_esp(payload: ESPIngestRequest) -> Optional[dict]:
         },
         "recommended_outputs": flatten_recommendations(result),
     }
+
+
+def _build_recommendation_only_response(
+    phase1_block: Optional[dict],
+    phase2_block: Optional[dict],
+) -> dict:
+    response = {"recommended_outputs": {}}
+    if phase1_block is not None:
+        response["recommended_outputs"]["phase1"] = phase1_block["recommended_outputs"]
+    if phase2_block is not None:
+        response["recommended_outputs"]["phase2"] = phase2_block["recommended_outputs"]
+    return response
+
+
+def _phase1_llm_recommendation(sensor_input: dict, recommended_outputs: dict, model_name: str) -> str:
+    api_key = require_api_key()
+    context_text = build_phase1_context(sensor_input, recommended_outputs)
+    first_prompt = {
+        "role": "user",
+        "content": (
+            "Based on these Phase 1 inputs and outputs, tell the farmer what to do and why. "
+            "Cover all recommendation outputs in the context, including zeros. "
+            "Use only the provided sensor values and output values for reasoning."
+        ),
+    }
+    return get_llm_response(api_key, model_name, context_text, [first_prompt])
+
+
+def _phase2_llm_recommendation(sensor_input: dict, recommended_outputs: dict, model_name: str) -> str:
+    api_key = require_api_key()
+    context_text = build_phase2_context(sensor_input, recommended_outputs)
+    first_prompt = {
+        "role": "user",
+        "content": (
+            "Based on this Phase 2 ORP input and outputs, tell the farmer what to do and why. "
+            "Cover all recommendation outputs in the context, including zeros. "
+            "Use only the provided sensor values and output values for reasoning."
+        ),
+    }
+    return get_llm_response(api_key, model_name, context_text, [first_prompt])
 
 
 def flatten_recommendations(result: dict) -> dict:
@@ -183,7 +281,7 @@ def get_llm_response(api_key: str, model_name: str, context_text: str, chat_hist
         "Always ground advice in the provided sensor values and model recommendation outputs. "
         "Do NOT invent sensor values, target thresholds, or hidden agronomy rules. Include units. "
         "For each relevant output, state action + reason in one short line. "
-        "If an output is 0, say 'No action needed' and explain why briefly."
+        "If an output is 0, say 'No action needed' with a brief reason."
     )
 
     messages = [
@@ -194,8 +292,8 @@ def get_llm_response(api_key: str, model_name: str, context_text: str, chat_hist
             "content": (
                 "Response format: keep it concise and complete. "
                 "Bullets are optional. "
-                "Use this simple structure: What to do, then Why. "
-                "Keep total response to 6-10 short lines."
+                "Use this structure: 'What to do' then 'Why'. "
+                "Keep total response to 6-10 short lines so it does not cut off."
             ),
         },
     ]
@@ -221,6 +319,88 @@ def serialize_chat_messages(messages: List[ChatMessage]) -> List[dict]:
     return [message.model_dump() for message in messages]
 
 
+def build_mobile_start_response(
+    *,
+    session_id: str,
+    phase: Literal["phase1", "phase2"],
+    sensor_data: dict,
+    recommended_outputs: dict,
+    first_chat_response: str,
+) -> dict:
+    """Standard response sent back to mobile after the first server round-trip."""
+    return {
+        "session_id": session_id,
+        "phase": phase,
+        "sensor_data": sensor_data,
+        "recommended_outputs": recommended_outputs,
+        "initial_chat_response": first_chat_response,
+        "first_chat_response": first_chat_response,
+        "chat_messages": [
+            {"role": "assistant", "content": first_chat_response},
+        ],
+    }
+
+
+def _build_mobile_prediction(
+    phase: Literal["phase1", "phase2"],
+    sensor_input: dict,
+    model_name: str,
+) -> tuple[dict, str, str]:
+    if phase == "phase1":
+        prediction = phase1_predict(
+            N=sensor_input["N"],
+            P=sensor_input["P"],
+            K=sensor_input["K"],
+            ph=sensor_input["ph"],
+            EC=sensor_input["EC_uS_cm"],
+        )
+        flat_prediction = flatten_recommendations(prediction)
+        context_text = build_phase1_context(sensor_input, flat_prediction)
+        first_prompt = {
+            "role": "user",
+            "content": (
+                "Based on these Phase 1 inputs and outputs, tell the farmer what to do and why. "
+                "Cover all recommendation outputs in the context, including zeros. "
+                "Use only the provided sensor values and output values for reasoning."
+            ),
+        }
+        first_response = get_llm_response(require_api_key(), model_name, context_text, [first_prompt])
+        return flat_prediction, context_text, first_response
+
+    prediction = phase2_predict(ORP=sensor_input["ORP_mV"])
+    flat_prediction = flatten_recommendations(prediction)
+    context_text = build_phase2_context(sensor_input, flat_prediction)
+    first_prompt = {
+        "role": "user",
+        "content": (
+            "Based on this Phase 2 ORP input and outputs, tell the farmer what to do and why. "
+            "Cover all recommendation outputs in the context, including zeros. "
+            "Use only the provided sensor values and output values for reasoning."
+        ),
+    }
+    first_response = get_llm_response(require_api_key(), model_name, context_text, [first_prompt])
+    return flat_prediction, context_text, first_response
+
+
+def _start_mobile_session(phase: Literal["phase1", "phase2"], sensor_input: dict, model_name: str) -> dict:
+    recommended_outputs, context_text, first_response = _build_mobile_prediction(phase, sensor_input, model_name)
+    session_id = str(uuid4())
+    SESSIONS[session_id] = SessionState(
+        phase=phase,
+        context_text=context_text,
+        model_name=model_name,
+        chat_messages=[ChatMessage(role="assistant", content=first_response)],
+    )
+    _save_session_store()
+    return build_mobile_start_response(
+        session_id=session_id,
+        phase=phase,
+        sensor_data=sensor_input,
+        recommended_outputs=recommended_outputs,
+        first_chat_response=first_response,
+    )
+
+
 @app.get("/health")
 def health_check() -> dict:
     return {"status": "ok"}
@@ -243,7 +423,7 @@ def esp_sample_data() -> dict:
 
 @app.post("/api/esp/ingest")
 def esp_ingest(payload: ESPIngestRequest) -> dict:
-    """ESP pushes sensor data here; server stores and auto-processes predictions."""
+    """Backward-compatible combined ingest route for mixed sensor payloads."""
     try:
         phase1_block = _phase1_from_esp(payload)
         phase2_block = _phase2_from_esp(payload)
@@ -273,9 +453,124 @@ def esp_ingest(payload: ESPIngestRequest) -> dict:
     }
     ESP_RECORDS.append(record)
 
+    response = _build_recommendation_only_response(phase1_block, phase2_block)
+    response["llm_recommendation"] = {}
+
+    if phase1_block is not None:
+        response["llm_recommendation"]["phase1"] = _phase1_llm_recommendation(
+            phase1_block["sensor_data"],
+            phase1_block["recommended_outputs"],
+            payload.model_name,
+        )
+    if phase2_block is not None:
+        response["llm_recommendation"]["phase2"] = _phase2_llm_recommendation(
+            phase2_block["sensor_data"],
+            phase2_block["recommended_outputs"],
+            payload.model_name,
+        )
+
+    return response
+
+
+@app.post("/api/esp/phase1")
+def esp_phase1_ingest(payload: ESPPhase1Request) -> dict:
+    """Phase 1-only route for Flutter when N/P/K/pH/EC are sent separately."""
+    sensor_input = {
+        "N": payload.N,
+        "P": payload.P,
+        "K": payload.K,
+        "ph": payload.ph,
+        "EC_uS_cm": payload.EC_uS_cm,
+    }
+
+    try:
+        prediction = phase1_predict(
+            N=payload.N,
+            P=payload.P,
+            K=payload.K,
+            ph=payload.ph,
+            EC=payload.EC_uS_cm,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    recommended_outputs = flatten_recommendations(prediction)
+    llm_recommendation = _phase1_llm_recommendation(
+        sensor_input,
+        recommended_outputs,
+        payload.model_name,
+    )
+
+    ESP_RECORDS.append(
+        {
+            "record_id": str(uuid4()),
+            "device_id": payload.device_id,
+            "timestamp": _make_iso_timestamp(payload.timestamp),
+            "raw_sensor_data": {
+                "N": payload.N,
+                "P": payload.P,
+                "K": payload.K,
+                "ph": payload.ph,
+                "EC_uS_cm": payload.EC_uS_cm,
+                "ORP_mV": None,
+            },
+            "phase1": {
+                "sensor_data": sensor_input,
+                "recommended_outputs": recommended_outputs,
+            },
+            "phase2": None,
+        }
+    )
+
     return {
-        "status": "ingested",
-        "record": record,
+        "phase": "phase1",
+        "recommended_outputs": recommended_outputs,
+        "llm_recommendation": llm_recommendation,
+    }
+
+
+@app.post("/api/esp/phase2")
+def esp_phase2_ingest(payload: ESPPhase2Request) -> dict:
+    """Phase 2-only route for Flutter when ORP is sent separately."""
+    sensor_input = {"ORP_mV": payload.ORP_mV}
+
+    try:
+        prediction = phase2_predict(ORP=payload.ORP_mV)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+    recommended_outputs = flatten_recommendations(prediction)
+    llm_recommendation = _phase2_llm_recommendation(
+        sensor_input,
+        recommended_outputs,
+        payload.model_name,
+    )
+
+    ESP_RECORDS.append(
+        {
+            "record_id": str(uuid4()),
+            "device_id": payload.device_id,
+            "timestamp": _make_iso_timestamp(payload.timestamp),
+            "raw_sensor_data": {
+                "N": None,
+                "P": None,
+                "K": None,
+                "ph": None,
+                "EC_uS_cm": None,
+                "ORP_mV": payload.ORP_mV,
+            },
+            "phase1": None,
+            "phase2": {
+                "sensor_data": sensor_input,
+                "recommended_outputs": recommended_outputs,
+            },
+        }
+    )
+
+    return {
+        "phase": "phase2",
+        "recommended_outputs": recommended_outputs,
+        "llm_recommendation": llm_recommendation,
     }
 
 
@@ -389,8 +684,6 @@ def test_demo() -> dict:
 
 @app.post("/api/phase1/start")
 def phase1_start(payload: Phase1Request) -> dict:
-    api_key = require_api_key()
-
     sensor_input = {
         "N": payload.N,
         "P": payload.P,
@@ -398,93 +691,41 @@ def phase1_start(payload: Phase1Request) -> dict:
         "ph": payload.ph,
         "EC_uS_cm": payload.EC_uS_cm,
     }
-
-    try:
-        prediction = phase1_predict(
-            N=payload.N,
-            P=payload.P,
-            K=payload.K,
-            ph=payload.ph,
-            EC=payload.EC_uS_cm,
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-
-    flat_prediction = flatten_recommendations(prediction)
-    context_text = build_phase1_context(sensor_input, flat_prediction)
-
-    first_prompt = {
-        "role": "user",
-        "content": (
-            "Based on these Phase 1 inputs and outputs, tell the farmer what to do and why. "
-            "Cover all recommendation outputs in the context, including zeros. "
-            "Use only provided values."
-        ),
-    }
-    first_response = get_llm_response(api_key, payload.model_name, context_text, [first_prompt])
-
-    session_id = str(uuid4())
-    SESSIONS[session_id] = SessionState(
-        phase="phase1",
-        context_text=context_text,
-        model_name=payload.model_name,
-        chat_messages=[
-            ChatMessage(role="assistant", content=first_response),
-        ],
-    )
-
-    return {
-        "session_id": session_id,
-        "phase": "phase1",
-        "sensor_data": sensor_input,
-        "recommendations": flat_prediction,
-        "first_chat_response": first_response,
-        "chat_messages": serialize_chat_messages(SESSIONS[session_id].chat_messages),
-    }
+    return _start_mobile_session("phase1", sensor_input, payload.model_name)
 
 
 @app.post("/api/phase2/start")
 def phase2_start(payload: Phase2Request) -> dict:
-    api_key = require_api_key()
-
     sensor_input = {"ORP_mV": payload.ORP_mV}
+    return _start_mobile_session("phase2", sensor_input, payload.model_name)
 
-    try:
-        prediction = phase2_predict(ORP=payload.ORP_mV)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
 
-    flat_prediction = flatten_recommendations(prediction)
-    context_text = build_phase2_context(sensor_input, flat_prediction)
+@app.post("/api/mobile/start")
+def mobile_start(payload: MobileStartRequest) -> dict:
+    """Single mobile entry point: send sensor data, get recommendations, then the first LLM reply."""
+    phase = payload.phase
+    sensor_input = dict(payload.sensor_data)
 
-    first_prompt = {
-        "role": "user",
-        "content": (
-            "Based on this Phase 2 ORP input and outputs, tell the farmer what to do and why. "
-            "Cover all recommendation outputs in the context, including zeros. "
-            "Use only provided values."
-        ),
-    }
-    first_response = get_llm_response(api_key, payload.model_name, context_text, [first_prompt])
+    if phase == "phase1":
+        required_keys = ["N", "P", "K", "ph", "EC_uS_cm"]
+        missing = [key for key in required_keys if key not in sensor_input]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Missing Phase 1 sensor fields: {', '.join(missing)}")
+        normalized_input = {
+            "N": float(sensor_input["N"]),
+            "P": float(sensor_input["P"]),
+            "K": float(sensor_input["K"]),
+            "ph": float(sensor_input["ph"]),
+            "EC_uS_cm": float(sensor_input["EC_uS_cm"]),
+        }
+        return _start_mobile_session("phase1", normalized_input, payload.model_name)
 
-    session_id = str(uuid4())
-    SESSIONS[session_id] = SessionState(
-        phase="phase2",
-        context_text=context_text,
-        model_name=payload.model_name,
-        chat_messages=[
-            ChatMessage(role="assistant", content=first_response),
-        ],
-    )
-
-    return {
-        "session_id": session_id,
-        "phase": "phase2",
-        "sensor_data": sensor_input,
-        "recommendations": flat_prediction,
-        "first_chat_response": first_response,
-        "chat_messages": serialize_chat_messages(SESSIONS[session_id].chat_messages),
-    }
+    required_keys = ["ORP_mV"]
+    missing = [key for key in required_keys if key not in sensor_input]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing Phase 2 sensor fields: {', '.join(missing)}")
+    normalized_input = {"ORP_mV": float(sensor_input["ORP_mV"])}
+    return _start_mobile_session("phase2", normalized_input, payload.model_name)
 
 
 @app.get("/api/chat/history/{session_id}")
@@ -526,9 +767,24 @@ def chat_followup(payload: FollowupRequest) -> dict:
     if len(session.chat_messages) > 30:
         session.chat_messages = session.chat_messages[-30:]
 
+    _save_session_store()
+
     return {
         "session_id": payload.session_id,
         "phase": session.phase,
+        "reply_to_mobile": assistant_response,
         "assistant_response": assistant_response,
         "chat_messages": serialize_chat_messages(session.chat_messages),
     }
+
+
+@app.post("/api/mobile/followup")
+def mobile_followup(payload: FollowupRequest) -> dict:
+    """Mobile-friendly alias for continuation chat."""
+    return chat_followup(payload)
+
+
+@app.get("/api/mobile/history/{session_id}")
+def mobile_history(session_id: str) -> dict:
+    """Mobile-friendly alias for chat history."""
+    return chat_history(session_id)

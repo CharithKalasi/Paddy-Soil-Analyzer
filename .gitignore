@@ -6,5 +6,12 @@ __pycache__/
 .ruff_cache/
 .DS_Store
 KrishiLink_MultiOutput_Training_Data_v4.csv
+KrishiLink_10k_RawUnits_Training_Data.csv
+KrishiLink_10k_RawUnits_Training_Data_noisy.csv
 Models/*.pkl
+model_selection_report.json
+model_selection_extended_report.json
+leakage_report.json
+leakage_action.txt
+server_state/
 .env

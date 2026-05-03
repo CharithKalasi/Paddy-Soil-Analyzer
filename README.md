@@ -114,17 +114,51 @@ Return shape:
 - `sensor_data`
 - `recommended_outputs`
 
+### Mobile-first chat start flow
+
+Use these when the mobile app sends sensor data to the server and needs the first recommendation plus the first LLM reply in one response:
+
+- `POST /api/mobile/start`
+- `POST /api/phase1/start`
+- `POST /api/phase2/start`
+
+Return shape:
+
+- `session_id`
+- `phase`
+- `sensor_data`
+- `recommended_outputs`
+- `initial_chat_response`
+- `chat_messages`
+
+`initial_chat_response` and `first_chat_response` contain the same text for backward compatibility.
+
+`/api/mobile/start` accepts:
+
+- `phase`: `phase1` or `phase2`
+- `sensor_data`: the sensor readings for that phase
+- `model_name` (optional)
+
 ### Chat endpoints (Flutter can mirror dashboard chat)
 
+- `POST /api/mobile/followup`
 - `POST /api/phase1/start`
 - `POST /api/phase2/start`
 - `POST /api/chat/followup`
 - `GET /api/chat/history/{session_id}`
 
+Use the mobile aliases if you want the Flutter app to stay decoupled from the dashboard route naming.
+
+For follow-up chat, send `{ session_id, message }` to `POST /api/chat/followup` and read the server reply from `reply_to_mobile` or `assistant_response`.
+
+The server now also persists session state to disk under `server_state/chat_sessions.json`, so chat context survives a PC restart unless that file is removed.
+
 ### ESP ingestion endpoints
 
 - `GET /api/esp/sample` - sample ESP payload format
-- `POST /api/esp/ingest` - ingest sensor packet from ESP
+- `POST /api/esp/phase1` - Phase 1-only ingest (`N`, `P`, `K`, `ph`, `EC_uS_cm`) with LLM recommendation
+- `POST /api/esp/phase2` - Phase 2-only ingest (`ORP_mV`) with LLM recommendation
+- `POST /api/esp/ingest` - backward-compatible combined ingest route
 - `GET /api/esp/latest` - latest ingested + processed packet
 - `GET /api/esp/history?limit=20` - recent records
 
@@ -134,7 +168,24 @@ ESP payload fields (send available values):
 - `timestamp` (optional)
 - `N`, `P`, `K`, `ph`, `EC_uS_cm`, `ORP_mV`
 
-The server auto-processes Phase 1 and/or Phase 2 blocks depending on provided fields.
+For Flutter-first architecture, send Phase 1 and Phase 2 packets separately to:
+
+- `POST /api/esp/phase1`
+- `POST /api/esp/phase2`
+
+Each route returns:
+
+- `phase`
+- `recommended_outputs`
+- `llm_recommendation`
+
+The mobile app can then forward the sensor data it receives from ESP to the server start endpoints above to get the recommendation and initial chat response.
+
+`POST /api/esp/ingest` response shape:
+
+- `recommended_outputs.phase1` (present only if full Phase 1 inputs are provided)
+- `recommended_outputs.phase2` (present only if `ORP_mV` is provided)
+- `llm_recommendation.phase1` / `llm_recommendation.phase2` for provided phase blocks
 
 ## Input Validation Ranges
 

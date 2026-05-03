@@ -6,10 +6,15 @@ import pandas as pd
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "Models"
+NPK_TUNED_MODEL_FILE = MODEL_DIR / "best_tuned_npk_model.pkl"
+PH_TUNED_MODEL_FILE = MODEL_DIR / "best_tuned_ph_model.pkl"
+EC_TUNED_MODEL_FILE = MODEL_DIR / "best_tuned_ec_model.pkl"
+ORP_TUNED_MODEL_FILE = MODEL_DIR / "best_tuned_orp_model.pkl"
 NPK_MODEL_FILE = MODEL_DIR / "npk_model.pkl"
 PH_MODEL_FILE = MODEL_DIR / "ph_model.pkl"
 EC_MODEL_FILE = MODEL_DIR / "ec_model.pkl"
 ORP_MODEL_FILE = MODEL_DIR / "orp_model.pkl"
+ORP_GB_MODEL_FILE = MODEL_DIR / "orp_gb_model.pkl"
 
 N_RANGE = (0, 100)
 P_RANGE = (0, 70)
@@ -18,11 +23,20 @@ PH_RANGE = (3.5, 9.0)
 EC_RANGE = (0, 3500)
 ORP_RANGE = (-350, 350)
 
+def load_model(preferred_path: Path, fallback_path: Path):
+    if preferred_path.exists():
+        return joblib.load(preferred_path)
+    return joblib.load(fallback_path)
 
-npk_model = joblib.load(NPK_MODEL_FILE)
-ph_model = joblib.load(PH_MODEL_FILE)
-ec_model = joblib.load(EC_MODEL_FILE)
-orp_model = joblib.load(ORP_MODEL_FILE)
+
+npk_model = load_model(NPK_TUNED_MODEL_FILE, NPK_MODEL_FILE)
+ph_model = load_model(PH_TUNED_MODEL_FILE, PH_MODEL_FILE)
+ec_model = load_model(EC_TUNED_MODEL_FILE, EC_MODEL_FILE)
+# ORP load preference: GradientBoosting model (best by MAE), then tuned RF, then fallback.
+if ORP_GB_MODEL_FILE.exists():
+    orp_model = joblib.load(ORP_GB_MODEL_FILE)
+else:
+    orp_model = load_model(ORP_TUNED_MODEL_FILE, ORP_MODEL_FILE)
 
 
 def validate_range(name, value, minimum, maximum):
@@ -173,7 +187,13 @@ def phase2_predict(ORP):
     validate_range("ORP_mV", ORP, *ORP_RANGE)
 
     orp_input = pd.DataFrame([[ORP]], columns=["ORP_mV"])
-    orp_prediction = float(orp_model.predict(orp_input)[0])
+    pred = orp_model.predict(orp_input)
+    # Handle both 1D and 2D predict outputs
+    if hasattr(pred, "ndim") and getattr(pred, "ndim") > 1:
+        val = pred[0][0]
+    else:
+        val = pred[0]
+    orp_prediction = float(val)
     flood_liters = max(0.0, min(10000.0, orp_prediction))
 
     return {
